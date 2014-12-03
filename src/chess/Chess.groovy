@@ -5,6 +5,8 @@ import groovy.time.TimeDuration
 
 class Chess {
 
+    def counter = 0
+
     /*
        The main solving wrapper
        @param sizeX  Horizontal size of the board
@@ -19,27 +21,25 @@ class Chess {
             throw new IllegalArgumentException("This number of pieces won''t fit that size of chess-board")
         }
 
-        Chess chess = new Chess()
+        if (sizeX*sizeY == pieces.size && pieces.size == 1) {
+            return 1
+        }
 
-        def freeCells = []
+        Chess chess = new Chess()
+        def freeSquares = []
 
         for (i in 1..sizeX) {
             for(j in 1..sizeY) {
-                freeCells += [x: i, y: j]
+                freeSquares += [x: i, y: j]
             }
-        }
-        def freeSquares = [:]
-
-        for (p in pieces) {
-            freeSquares[p] = freeCells
         }
 
         def timeStart = new Date()
-        def layouts = chess.findLayouts([:], freeSquares, pieces, sizeX, sizeY)
+        chess.findLayouts([:], freeSquares, pieces, sizeX, sizeY)
         def timeStop = new Date()
         TimeDuration duration = TimeCategory.minus(timeStop, timeStart)
         println "Total Time of running: " + duration
-        return layouts
+        return chess.counter
     }
 
     /*
@@ -47,86 +47,66 @@ class Chess {
        @param nonFreeSquares Already placed pieces on the board
        @param freeSquares    Keeps coordinates of where on the board we can be put so that not to threaten others.
        @param pieces         Pieces at our disposal left to place on the board
+       @param sizeX          Horizontal size of the board
+       @param sizeY          Vertical size of the board
        @return               A collection of all layouts containing pairs of [coordinates, piece]
      */
     def findLayouts(nonFreeSquares, freeSquares, pieces, sizeX, sizeY) {
 
-        if(pieces == []) {
-            return nonFreeSquares // return the configuration of layout
+        if(pieces.isEmpty()) {
+            printLayout(nonFreeSquares, sizeX, sizeY)
+            return
         }
 
         def positions = getFreeSquaresForNextPiece(nonFreeSquares, freeSquares, getNextPiece(pieces), sizeX, sizeY)
 
-        // No solution for this layout, backtrack:
-        if (positions == []) {
-            return []
+        if (positions.isEmpty()) {
+            return // No solution for this layout, backtrack
         }
-
-        def layouts = []
 
         for(e in positions) {
-            def piece = e['piece']
-            def nonFreeSquaresNew = e['nonFree']
-            def freeSquaresNew = e['free']
-
-            def layout = findLayouts(nonFreeSquaresNew, freeSquaresNew, pieces - piece['name'], sizeX, sizeY)
-
-            if (!layout.isEmpty()) {
-                layouts.add(layout)
-            }
+            findLayouts(e['nonFree'], e['free'], pieces - e['piece']['name'], sizeX, sizeY)
         }
-
-        return layouts.flatten()
     }
 
     def getFreeSquaresForNextPiece(nonFreeSquares, freeSquares, piece, sizeX, sizeY) {
 
-        def frees = freeSquares[piece['name']]
-        def count = piece['count']
+        if (freeSquares == []) {
+            return []
+        }
+
         def positions = []
 
-        // Non-optimized in-house intersection closure as groovy cannot properly process such (x,y) pairs
+        // In-house intersection closure as Groovy cannot intersect (x,y) pairs properly
         def isThreat = { nonFreeSquaresThis, threatenedSquaresThis ->
-            def nonFreeSet = nonFreeSquaresThis.keySet() + []
+            def nonFreeSet = nonFreeSquaresThis.keySet()
             for (e in threatenedSquaresThis) {
                 if(nonFreeSet.contains(e)) return true
             }
             return false
         }
 
-        if (count > 1) {
-            // non-lazy combinations, slowers drastically work for large sets
-            frees = Utils.choose(frees, count)
-        }
+        def combinations = new Combinations(freeSquares, piece['count']) // Doing it lazily via Iterator
 
-        for(freeSquare in frees) {
+        for(comb in combinations) {
             def nonFreeSquaresNew = nonFreeSquares + []
-            def threatenedSquaresNew = []
+            def threatenedSquares = []
 
-            if(count > 1) {
-              for (freeCell in freeSquare) {
-                  threatenedSquaresNew += getThreats(piece['name'], freeCell['x'], freeCell['y'], sizeX, sizeY)
-                  nonFreeSquaresNew[freeCell] = piece['name']
+              for (freeSquare in comb) {
+                  threatenedSquares += getThreats(piece['name'], freeSquare['x'], freeSquare['y'], sizeX, sizeY)
+                  nonFreeSquaresNew[freeSquare] = piece['name']
               }
-            } else {
-                threatenedSquaresNew = getThreats(piece['name'], freeSquare['x'], freeSquare['y'], sizeX, sizeY)
-                nonFreeSquaresNew[freeSquare] = piece['name']
-            }
 
-            // Some squares are threatened, thus we avoid this configuration
-            if(isThreat(nonFreeSquaresNew, threatenedSquaresNew)) {
+            // Some squares are threatened, prune this configuration
+            if(isThreat(nonFreeSquaresNew, threatenedSquares)) {
                 continue;
             }
 
-            def updatedFreeSquares = updateFreeSquares(freeSquares, (nonFreeSquaresNew.keySet() + threatenedSquaresNew).flatten())
+            def freeSquaresNew = updateFreeSquares(freeSquares, nonFreeSquaresNew, threatenedSquares)
 
-            // Out of free squares for some piece, thus we avoid this configuration
-            if (updatedFreeSquares.any{ it.value == [] }) {
-                continue;
-            }
-
-            positions.add(['piece':piece, 'nonFree':nonFreeSquaresNew, 'free': updatedFreeSquares])
+            positions.add(['piece':piece, 'nonFree':nonFreeSquaresNew, 'free': freeSquaresNew])
         }
+
         return positions
     }
 
@@ -193,13 +173,8 @@ class Chess {
         return listOfThreats
     }
 
-    def updateFreeSquares(freeSquares, nonFreeSquares) {
-        def freeSquaresNew = freeSquares + []
-        for(e in freeSquaresNew) {
-            def frees = e.value.toSet() - nonFreeSquares.toSet()
-            freeSquaresNew[e.key] = frees
-        }
-       return freeSquaresNew
+    def updateFreeSquares(freeSquares, nonFreeSquares, threatenedSquares) {
+        return (freeSquares.toSet() - (nonFreeSquares.keySet() + threatenedSquares).toSet())
     }
 
     def getNextPiece(pieces) {
@@ -207,34 +182,22 @@ class Chess {
          return [name:entry.key, count:entry.value]
     }
 
-    def static prettyPrintAllLayouts(layouts, sizeX, sizeY) {
+    def printLayout(layout, sizeX, sizeY) {
+        println 'Layout No. ' + ++counter + ':'
 
-       def format = { layout ->
-
-           for(i in 1..sizeX) {
-               for(j in 1..sizeY) {
-                  def k = [x:i, y:j];
-                  if(layout.containsKey(k)) {
-                      def v = layout.get(k)
-                      print v
-                  } else {
-                      print '.'
-                  }
-               }
-               println ''
+        for(i in 1..sizeX) {
+           for(j in 1..sizeY) {
+              def k = [x:i, y:j];
+              if(layout.containsKey(k)) {
+                  def v = layout.get(k)
+                  print v
+              } else {
+                  print '.'
+              }
            }
-       }
-
-       println 'There are ' + layouts.size() + ' different layouts of chessboard:'
-
-       int i = 1
-
-       for (l in layouts) {
-           println 'Layout No. ' + i++ + ':'
-           format(l)
            println ''
        }
-
+        println ''
     }
 
 }
